@@ -1,0 +1,171 @@
+* マルチアカウントサービス通知先を AWSアカウントごとに分けたい EventBridge アーキテクチャ
+** 概要
+   [[file:./image/arch.png]]
+
+   ブログ: 
+** backend.tf
+   #+begin_src terraform :tangle ./backend.tf
+terraform {
+  required_version = "~> 1.1.2"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 3.74.3"
+    }
+  }
+
+  # backend s3 {
+  #   bucket         = "xxx"
+  #   key            = "terraform.tfstate"
+  #   region         = "ap-northeast-1"
+  #   dynamodb_table = "terraform_state_lock"
+  # }
+}
+
+provider "aws" {
+  region              = "ap-northeast-1"
+
+  default_tags {
+    tags = {
+      Terraform   = true,
+    }
+  }
+}
+   #+end_src
+** capture-securityhub-findings.tf
+   #+begin_src terraform :tangle ./capture-securityhub-findings.tf
+resource aws_cloudwatch_event_bus custom {
+  name = "custom-securityhub-bus"
+}
+
+resource aws_cloudwatch_event_rule to_custom {
+  name           = "capture-securityhub-findings"
+  event_bus_name = "default"
+
+  event_pattern = <<-EOF
+    {
+      "source": ["aws.securityhub"],
+      "detail-type": ["Security Hub Findings - Imported"],
+      "detail": {
+        "findings": {
+          "ProductName": ["Security Hub"],
+          "RecordState": ["ACTIVE"],
+          "Severity": {
+            "Label": ["CRITICAL", "HIGH"]
+          },
+          "Compliance": {
+            "Status": [
+              { "anything-but": "PASSED" }
+            ]
+          },
+          "Workflow": {
+            "Status": ["NEW"]
+          }
+        }
+      }
+    }
+  EOF
+}
+
+resource aws_cloudwatch_event_target to_custom {
+  event_bus_name = "default"
+  rule           = aws_cloudwatch_event_rule.to_custom.name
+  target_id      = "custom-securityhub-bus"
+  role_arn       = aws_iam_role.to_custom.arn
+  arn            = aws_cloudwatch_event_bus.custom.arn
+}
+
+# IAM Role for EventBridge
+resource aws_iam_role to_custom {
+  name = "capture-securityhub-findings-role"
+
+  assume_role_policy = <<-EOF
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Action": "sts:AssumeRole",
+          "Principal": {
+            "Service": "events.amazonaws.com"
+          },
+          "Effect": "Allow"
+        }
+      ]
+    }
+  EOF
+
+  inline_policy {
+    name   = "events-PutEvents"
+    policy =  <<-EOF
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Action": "events:PutEvents",
+            "Resource": "${aws_cloudwatch_event_bus.custom.arn}"
+          }
+        ]
+      }
+    EOF
+  }
+}
+   #+end_src
+** account-selector.tf
+   #+begin_src terraform :tangle ./account-selector.tf
+# ################
+# Selector for AAA
+# ################
+resource aws_sns_topic aaa {
+  name = "aaa-security-topic"
+}
+
+
+resource aws_sns_topic_policy aaa {
+  arn = aws_sns_topic.aaa.arn
+  policy =  <<-EOF
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Principal": {
+            "Service": "events.amazonaws.com"
+          },
+          "Action": "sns:Publish",
+          "Resource": "*"
+        }
+      ]
+    }
+  EOF
+}
+
+resource aws_sns_topic_subscription aaa {
+  topic_arn = aws_sns_topic.aaa.arn
+  protocol  = "email"
+  endpoint  = "example+aaa@example.com"
+}
+
+resource aws_cloudwatch_event_rule aaa {
+  name           = "account-selector-aaa"
+  event_bus_name = aws_cloudwatch_event_bus.custom.name
+
+  event_pattern = <<-EOF
+    {
+      "detail": {
+        "findings": {
+          "AwsAccountId": ["123456789012"]
+        }
+      }
+    }
+  EOF
+}
+
+resource aws_cloudwatch_event_target aaa {
+  event_bus_name = aws_cloudwatch_event_bus.custom.name
+  rule           = aws_cloudwatch_event_rule.aaa.name
+  target_id      = "sns-topic"
+  arn            = aws_sns_topic.aaa.arn
+}
+   #+end_src
