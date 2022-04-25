@@ -2,7 +2,7 @@
 ** 概要
    [[file:./image/arch.png]]
 
-   ブログ: 
+   ブログ: https://dev.classmethod.jp/articles/eventbridge-architectures-for-multi-account-services/
 ** backend.tf
    #+begin_src terraform :tangle ./backend.tf
 terraform {
